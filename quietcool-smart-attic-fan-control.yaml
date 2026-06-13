@@ -9,6 +9,7 @@ substitutions:
   service_uuid: "000000ff-0000-1000-8000-00805f9b34fb"
   characteristic_uuid: "0000ff01-0000-1000-8000-00805f9b34fb"
   mac_address: "00:00:00:00:00:00"
+  fan_speed_count: "2"
 
 # Basic ESPHome device configuration
 esphome:
@@ -52,7 +53,7 @@ ble_client:
       - delay: 2s
       - script.execute:
           id: send_ble_msg
-          msg: !lambda return "{\"Api\":\"Login\",\"PhoneID\":\"" + id(pair_id).state + "\"}";
+          msg: !lambda return "{\"A\":13,\"P\":\"" + id(pair_id).state + "\"}";
       - script.wait: send_ble_msg
 
 # Global Variables and Utilities
@@ -74,8 +75,11 @@ logger:
 # Fan Control Scripts
 # ----------------------------------------
 # Scripts handle different aspects of fan control:
-# - set_mode: Changes fan operation mode (Timer/Idle)
+# - set_mode: Changes fan operation mode (Run/Timer/TH/Idle)
+# - set_speed: Configures continuous manual-run speed
 # - set_timer: Configures timer duration and speed
+# - start_manual_run: Starts continuous Run mode, with a long-timer fallback for Medium
+# - start_selected_mode: Starts the mode selected in Home Assistant
 # - send_ble_msg: Handles BLE message transmission
 script:
   - id: set_mode
@@ -84,7 +88,15 @@ script:
     then:
       - script.execute:
           id: send_ble_msg
-          msg: !lambda return "{\"Api\":\"SetMode\",\"Mode\":\"" + mode + "\"}";
+          msg: !lambda return "{\"A\":9,\"M\":\"" + mode + "\"}";
+      - script.wait: send_ble_msg
+  - id: set_speed
+    parameters:
+      speed: string
+    then:
+      - script.execute:
+          id: send_ble_msg
+          msg: !lambda return "{\"A\":18,\"S\":\"" + speed + "\"}";
       - script.wait: send_ble_msg
   - id: set_timer
     parameters:
@@ -94,8 +106,67 @@ script:
     then:
       - script.execute:
           id: send_ble_msg
-          msg: !lambda return "{\"Api\":\"SetTime\",\"SetHour\":" + std::to_string(hours) + ",\"SetMinute\":" + std::to_string(minutes) + ",\"SetTime_Range\":\"" + speed + "\"}";
+          msg: !lambda return "{\"A\":7,\"H\":" + std::to_string(hours) + ",\"M\":" + std::to_string(minutes) + ",\"R\":\"" + speed + "\"}";
       - script.wait: send_ble_msg
+  - id: start_manual_run
+    parameters:
+      speed: string
+    then:
+      - if:
+          condition:
+            lambda: return speed == "MEDIUM";
+          then:
+            # V2 Run-mode SetSpeed only accepts LOW/HIGH. Timer mode is the
+            # known-working way to select MEDIUM on three-speed controllers.
+            - script.execute:
+                id: set_timer
+                speed: "MEDIUM"
+                hours: 23
+                minutes: 59
+            - script.wait: set_timer
+            - script.execute:
+                id: set_mode
+                mode: "Timer"
+            - script.wait: set_mode
+          else:
+            - script.execute:
+                id: set_speed
+                speed: !lambda return speed;
+            - script.wait: set_speed
+            - script.execute:
+                id: set_mode
+                mode: "Run"
+            - script.wait: set_mode
+  - id: start_selected_mode
+    then:
+      - if:
+          condition:
+            lambda: return id(operating_mode).current_option() == "Manual Run";
+          then:
+            - script.execute:
+                id: start_manual_run
+                speed: !lambda return id(manual_speed).current_option().str();
+            - script.wait: start_manual_run
+          else:
+            - if:
+                condition:
+                  lambda: return id(operating_mode).current_option() == "Timer Run";
+                then:
+                  - script.execute:
+                      id: set_timer
+                      speed: !lambda return id(manual_speed).current_option().str();
+                      hours: !lambda return id(timer_hours).state;
+                      minutes: !lambda return id(timer_minutes).state;
+                  - script.wait: set_timer
+                  - script.execute:
+                      id: set_mode
+                      mode: "Timer"
+                  - script.wait: set_mode
+                else:
+                  - script.execute:
+                      id: set_mode
+                      mode: "TH"
+                  - script.wait: set_mode
   - id: send_ble_msg
     parameters:
       msg: string
@@ -114,7 +185,7 @@ script:
 # ----------------------------------------
 # Template-based fan platform that provides:
 # - Two speed levels (LOW/HIGH)
-# - Timer-based operation
+# - Continuous manual operation
 # - State restoration after power loss
 fan:
   - platform: template
@@ -122,26 +193,22 @@ fan:
     id: quietcool_fan
     has_direction: false
     has_oscillating: false
-    speed_count: 2
+    speed_count: ${fan_speed_count}
     restore_mode: RESTORE_DEFAULT_OFF
     on_speed_set:
       - logger.log: "Setting speed"
       - script.execute:
-          id: set_timer
-          speed: !lambda 'return x == 2 ? "HIGH" : "LOW";'
-          hours: 3
-          minutes: 0
-      - script.wait: set_timer
-      - script.execute:
-          id: set_mode
-          mode: "Timer"
-      - script.wait: set_mode
+          id: start_manual_run
+          speed: !lambda |-
+            if (x == ${fan_speed_count}) return "HIGH";
+            if (${fan_speed_count} == 3 && x == 2) return "MEDIUM";
+            return "LOW";
+      - script.wait: start_manual_run
     on_turn_on:
-      - logger.log: "Turning on timer"
+      - logger.log: "Turning on selected operating mode"
       - script.execute:
-          id: set_mode
-          mode: "Timer"
-      - script.wait: set_mode
+          id: start_selected_mode
+      - script.wait: start_selected_mode
       - event.trigger:
           id: fan_on_event
           event_type: fan_on
@@ -177,7 +244,10 @@ number:
           id: set_timer
           hours: !lambda return x;
           minutes: !lambda return id(timer_minutes).state;
-          speed: &set_timer_speed !lambda 'return id(quietcool_fan).speed == 2 ? "HIGH" : "LOW";'
+          speed: &set_timer_speed !lambda |-
+            if (id(quietcool_fan).speed == ${fan_speed_count}) return "HIGH";
+            if (${fan_speed_count} == 3 && id(quietcool_fan).speed == 2) return "MEDIUM";
+            return "LOW";
 
   - platform: template
     name: "Timer Minutes"
@@ -195,6 +265,68 @@ number:
           hours: !lambda return id(timer_hours).state;
           minutes: !lambda return x;
           speed: *set_timer_speed
+
+# Operating Mode Control
+# ----------------------------------------
+# Manual Run runs continuously at the selected speed.
+# Timer Run runs at the selected speed for the configured timer duration.
+# Smart Temperature & Humidity uses the thresholds stored in the controller.
+select:
+  - platform: template
+    name: "Manual Speed"
+    id: manual_speed
+    options:
+      - "LOW"
+      - "MEDIUM"
+      - "HIGH"
+    optimistic: true
+    initial_option: "LOW"
+    on_value:
+      - if:
+          condition:
+            lambda: return id(quietcool_fan).state;
+          then:
+            - if:
+                condition:
+                  lambda: return id(operating_mode).current_option() == "Manual Run";
+                then:
+                  - script.execute:
+                      id: start_manual_run
+                      speed: !lambda return x;
+                  - script.wait: start_manual_run
+                else:
+                  - if:
+                      condition:
+                        lambda: return id(operating_mode).current_option() == "Timer Run";
+                      then:
+                        - script.execute:
+                            id: set_timer
+                            speed: !lambda return x;
+                            hours: !lambda return id(timer_hours).state;
+                            minutes: !lambda return id(timer_minutes).state;
+                        - script.wait: set_timer
+                        - script.execute:
+                            id: set_mode
+                            mode: "Timer"
+                        - script.wait: set_mode
+
+  - platform: template
+    name: "Operating Mode"
+    id: operating_mode
+    options:
+      - "Manual Run"
+      - "Timer Run"
+      - "Smart Temperature & Humidity"
+    optimistic: true
+    initial_option: "Manual Run"
+    on_value:
+      - if:
+          condition:
+            lambda: return id(quietcool_fan).state;
+          then:
+            - script.execute:
+                id: start_selected_mode
+            - script.wait: start_selected_mode
 
 # Device Configuration
 # ----------------------------------------
@@ -219,7 +351,12 @@ button:
       then:
         - script.execute:
             id: send_ble_msg
-            msg: !lambda return "{\"Api\":\"Pair\",\"PhoneID\":\"" + id(pair_id).state + "\"}";
+            msg: !lambda return "{\"A\":14,\"P\":\"" + id(pair_id).state + "\"}";
+        - script.wait: send_ble_msg
+        - delay: 2s
+        - script.execute:
+            id: send_ble_msg
+            msg: !lambda return "{\"A\":13,\"P\":\"" + id(pair_id).state + "\"}";
         - script.wait: send_ble_msg
 
 # Sensor Templates and Configurations
@@ -254,6 +391,10 @@ sensor:
   - <<: *temperature_sensor
     name: get_temp_h
     id: get_temp_h
+    disabled_by_default: true
+  - <<: *temperature_sensor
+    name: get_temp_m
+    id: get_temp_m
     disabled_by_default: true
   - <<: *humidity_sensor
     name: get_hum_h
@@ -335,58 +476,75 @@ text_sensor:
       - lambda: |-
             static std::string& accumulated = id(ble_message);
             accumulated += x;
+
+            // Some controllers prefix responses with an acknowledgement such as
+            // "QQ". Discard everything before the first JSON object.
+            size_t json_start = accumulated.find('{');
+            if (json_start == std::string::npos) {
+              if (accumulated.size() > 256) {
+                accumulated.clear();
+              }
+              return;
+            }
+            if (json_start > 0) {
+              accumulated.erase(0, json_start);
+            }
+
             if (!x.empty() && x.back() == '}') {
-              id(quietcool_ble_data).publish_state(accumulated);
-              ESP_LOGD("quietcool", "Received JSON data: %s", accumulated.c_str());
               bool parsed = false;
               json::parse_json(accumulated, [&parsed](JsonObject root) -> bool {
                 parsed = true;
                 
-                // Iterate through all JSON keys
+                int api = root["A"] | 0;
+
                 for (JsonObject::iterator it = root.begin(); it != root.end(); ++it) {
                   std::string key = it->key().c_str();
-                  std::string transformed;
-                  
-                  // Convert to snake_case, handling existing underscores
-                  for (size_t i = 0; i < key.length(); i++) {
-                    if (std::isupper(key[i])) {
-                      // Add underscore before uppercase letters, but not if:
-                      // - it's the first character
-                      // - previous character was already an underscore
-                      if (i > 0 && key[i-1] != '_') {
-                        transformed += '_';
-                      }
-                      transformed += std::tolower(key[i]);
-                    } else {
-                      transformed += key[i];
-                    }
+                  if (key == "A") continue;
+
+                  if (api == 1) {
+                    if (key == "C") continue;
+                    if (key == "M") { id(mode).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "R") { id(range).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "S") { id(sensor_state).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "T") { id(temp_sample).publish_state(it->value().as<float>() / 10.0f); continue; }
+                    if (key == "H") { id(humidity_sample).publish_state(it->value().as<float>()); continue; }
                   }
-                  
-                  // Try to find a matching sensor
-                  auto *sensor = App.get_sensor_by_key(fnv1_hash(transformed.c_str()));
-                  if (sensor != nullptr) {
-                    float value = it->value().as<float>();
-                    sensor->publish_state(value);
-                    continue;
+
+                  if (api == 2) {
+                    if (key == "B") { id(mode).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "C") { id(fan_type).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "D") { id(get_temp_h).publish_state(it->value().as<float>()); continue; }
+                    if (key == "E") { id(get_temp_m).publish_state(it->value().as<float>()); continue; }
+                    if (key == "F") { id(get_temp_l).publish_state(it->value().as<float>()); continue; }
+                    if (key == "G") { id(get_hum_h).publish_state(it->value().as<float>()); continue; }
+                    if (key == "H") { id(get_hum_l).publish_state(it->value().as<float>()); continue; }
+                    if (key == "I") { id(get_hum_range).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "J") { id(get_hour).publish_state(it->value().as<float>()); continue; }
+                    if (key == "K") { id(get_minute).publish_state(it->value().as<float>()); continue; }
+                    if (key == "L") { id(get_time_range).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "M") { id(pair_state).publish_state(it->value().as<std::string>()); continue; }
                   }
-                  
-                  // Try to find a matching text sensor
-                  auto *text_sensor = App.get_text_sensor_by_key(fnv1_hash(transformed.c_str()));
-                  if (text_sensor != nullptr) {
-                    std::string value = it->value().as<std::string>();
-                    text_sensor->publish_state(value);
-                    continue;
+
+                  if (api == 17) {
+                    if (key == "G") continue;
+                    if (key == "N") { id(name).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "M") { id(model).publish_state(it->value().as<std::string>()); continue; }
+                    if (key == "S") { id(serial_num).publish_state(it->value().as<std::string>()); continue; }
                   }
-                  
-                  ESP_LOGD("quietcool", "No sensor found for key: %s", transformed.c_str());
+
+                  ESP_LOGD("quietcool", "No mapping for API %d key: %s", api, key.c_str());
                 }
                 
                 return true;
               });
-              if (!parsed) {
-                ESP_LOGW("quietcool", "Failed to parse JSON: %s", accumulated.c_str());
+              if (parsed) {
+                id(quietcool_ble_data).publish_state(accumulated);
+                ESP_LOGD("quietcool", "Received JSON data: %s", accumulated.c_str());
+                accumulated.clear();
+              } else if (accumulated.size() > 4096) {
+                ESP_LOGW("quietcool", "Discarding oversized invalid JSON response");
+                accumulated.clear();
               }
-              accumulated.clear();
             }
 
 # Periodic Updates
@@ -401,17 +559,17 @@ interval:
     then:
       - script.execute:
           id: send_ble_msg
-          msg: !lambda return "{\"Api\":\"GetParameter\"}";
+          msg: !lambda return "{\"A\":2}";
       - script.wait: send_ble_msg
       - delay: 5s
       - script.execute:
           id: send_ble_msg
-          msg: !lambda return "{\"Api\":\"GetWorkState\"}";
+          msg: !lambda return "{\"A\":1}";
       - script.wait: send_ble_msg
       - delay: 5s
       - script.execute:
           id: send_ble_msg
-          msg: !lambda return "{\"Api\":\"GetFanInfo\"}";
+          msg: !lambda return "{\"A\":17}";
       - script.wait: send_ble_msg
 
 time:

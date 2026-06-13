@@ -1,0 +1,24 @@
+# QuietCool BLE bridge for the M5Stack ATOM Lite.
+#
+# Set mac_address to the Bluetooth MAC address shown by the QuietCool app
+# before installing this configuration.
+substitutions:
+  mac_address: "EC:E3:34:ED:7F:C2"
+  fan_speed_count: "3"
+
+packages:
+  quietcool: !include quietcool-smart-attic-fan-control.yaml
+
+esphome:
+  name: quietcool-atom-lite
+  friendly_name: QuietCool Fan
+  name_add_mac_suffix: true
+
+esp32:
+  board: m5stack-atom
+  framework:
+    type: arduino
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true

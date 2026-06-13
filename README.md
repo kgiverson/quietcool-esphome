@@ -7,18 +7,66 @@ This repository contains ESPHome configurations for controlling QuietCool whole 
 
 The project provides a web-based installation interface using [ESP Web Tools](https://esphome.github.io/esp-web-tools/), making it easy to flash your ESP device directly from your browser.
 
+For the tested M5Stack ATOM Lite setup, confirmed V2 BLE protocol, known
+limitations, and session resume notes, see [SESSION_HANDOFF.md](SESSION_HANDOFF.md).
+
 ## Configurations
 
 ### quietcool-smart-attic-fan-control.yaml
 
 This configuration file provides smart control for QuietCool attic fans. Features include:
 
-- Temperature-based automatic control
-- Manual speed control (Low/High)
+- Manual two- or three-speed control
+- Configurable timer control
 - Integration with Home Assistant
 - Real-time temperature and humidity monitoring
-- Automatic shutdown when attic temperature reaches desired level
-- Web-based control interface
+- BLE pairing and status monitoring
+
+### M5Stack ATOM Lite
+
+The `quietcool-m5stack-atom-lite.yaml` configuration runs this project as an
+external BLE-to-Wi-Fi bridge on an M5Stack ATOM Lite. It does not replace or
+require wiring to the QuietCool controller. Place the ATOM Lite within reliable
+Bluetooth range of the fan controller.
+
+This configuration enables three-speed control and uses the numeric JSON API
+required by newer QuietCool controller firmware.
+
+To install it with the ESPHome Device Builder in Home Assistant:
+
+1. Connect the ATOM Lite to the Home Assistant host with a data-capable USB-C
+   cable.
+2. Create a new ESPHome device and choose the connected USB serial port.
+3. Replace the generated configuration with `quietcool-m5stack-atom-lite.yaml`.
+4. Set `mac_address` to the Bluetooth MAC address shown by the QuietCool app.
+5. Keep the generated `wifi`, `api`, and `ota` credentials if you want encrypted
+   API access and a configured Wi-Fi network.
+6. Install over USB. Later updates can be installed wirelessly.
+7. Add the device to Home Assistant, put the QuietCool controller into pairing
+   mode with its app, and press the device's **Pair BLE** button in Home
+   Assistant.
+
+The pairing ID is an arbitrary 16-character hexadecimal string. The default is
+valid, but you can change it using the **Pair ID** entity before pairing.
+
+### Home Assistant controls
+
+- **QuietCool Fan** is the sole on/off control. Turning it on starts the selected
+  Operating Mode; turning it off stops the fan.
+- **Manual Speed** provides an explicit Low, Medium, or High dropdown.
+- On V2 three-speed controllers, Manual Run Medium uses a 23-hour-59-minute
+  timer fallback because the continuous-run speed command only accepts Low and
+  High. Re-select Medium to restart that period.
+- **Operating Mode** selects Manual Run, Timer Run, or Smart Temperature &
+  Humidity. Changing it while off only changes the next mode; changing it while
+  on switches modes immediately.
+- **Timer Hours** and **Timer Minutes** configure the Timer Run duration.
+- **Smart Temperature & Humidity** uses the temperature and humidity thresholds
+  currently stored in the QuietCool controller. Applying a preset in the app
+  writes its values to these active thresholds; the controller does not appear
+  to reference a named preset while running.
+- A **Pair State** value of `No` is normal after pairing; it means the controller
+  is not currently accepting new pairings.
 
 ## Getting Started
 
